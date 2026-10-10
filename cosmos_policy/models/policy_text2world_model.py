@@ -302,6 +302,10 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
             value_function_sample_mask=data_batch["value_function_sample_mask"],
             value_function_return=data_batch["value_function_return"],
             value_indices=data_batch["value_latent_idx"],
+            force=data_batch.get("force"),
+            current_force_indices=data_batch.get("current_force_latent_idx"),
+            future_force=data_batch.get("future_force"),
+            future_force_indices=data_batch.get("future_force_latent_idx"),
         )
 
         if self.loss_reduce == "mean":
@@ -336,6 +340,10 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
         value_function_sample_mask: torch.Tensor,
         value_function_return: torch.Tensor,
         value_indices: torch.Tensor,
+        force: Optional[torch.Tensor] = None,
+        current_force_indices: Optional[torch.Tensor] = None,
+        future_force: Optional[torch.Tensor] = None,
+        future_force_indices: Optional[torch.Tensor] = None,
     ):
         """
         NOTE (user): Modified to add action chunk prediction and future image prediction + action chunk loss logging.
@@ -367,6 +375,10 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
             value_function_sample_mask: mask for value function samples
             value_function_return: ground truth value function returns
             value_indices: indices for value latent frames
+            force: current 6-axis force (B, D_force), optional
+            current_force_indices: indices for current force latent frames, optional
+            future_force: future 6-axis force target (B, D_force), optional
+            future_force_indices: indices for future force latent frames, optional
 
         Returns:
             tuple: A tuple containing four elements:
@@ -405,6 +417,15 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
                 future_proprio,
                 proprio_indices=future_proprio_indices,
             )
+        # Current / future 6-axis force
+        use_current_force = force is not None and current_force_indices is not None and torch.all(current_force_indices != -1)
+        use_future_force = (
+            future_force is not None and future_force_indices is not None and torch.all(future_force_indices != -1)
+        )
+        if use_current_force:
+            x0_B_C_T_H_W = replace_latent_with_proprio(x0_B_C_T_H_W, force, proprio_indices=current_force_indices)
+        if use_future_force:
+            x0_B_C_T_H_W = replace_latent_with_proprio(x0_B_C_T_H_W, future_force, proprio_indices=future_force_indices)
         # Value: only overwrite when we have a dedicated value frame (value_indices != -1).
         # When value_latent_idx=-1 (e.g. Franka return_value_function_returns=False), do NOT write:
         # otherwise we would write to x0[..., -1, ...] = last frame and overwrite future primary image with -100.
@@ -487,6 +508,8 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
                     mask_B_T[world_batch_indices, future_tactile_left_indices[world_batch_indices]] = 1
                 if future_tactile_right_indices is not None and torch.all(future_tactile_right_indices != -1):
                     mask_B_T[world_batch_indices, future_tactile_right_indices[world_batch_indices]] = 1
+                if use_future_force:
+                    mask_B_T[world_batch_indices, future_force_indices[world_batch_indices]] = 1
             # Rollout value-function samples (rollout_data_mask == 1 and value_function_sample_mask == 1)
             value_idx_B = (
                 ((rollout_data_mask == 1) & (value_function_sample_mask == 1)).to(torch.long).to(sigma_B_T.device)
@@ -535,6 +558,8 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
                     mask_B_T[demo_batch_indices, future_tactile_left_indices[demo_batch_indices]] = 1
                 if future_tactile_right_indices is not None and torch.all(future_tactile_right_indices != -1):
                     mask_B_T[demo_batch_indices, future_tactile_right_indices[demo_batch_indices]] = 1
+                if use_future_force:
+                    mask_B_T[demo_batch_indices, future_force_indices[demo_batch_indices]] = 1
             # Rollout world-model samples (rollout_data_mask == 1 and world_model_sample_mask == 1)
             world_idx_B = (rollout_data_mask == 1) & (world_model_sample_mask == 1).to(torch.long).to(sigma_B_T.device)
             if torch.any(world_idx_B):
@@ -559,6 +584,8 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
                     mask_B_T[world_batch_indices, future_tactile_left_indices[world_batch_indices]] = 1
                 if future_tactile_right_indices is not None and torch.all(future_tactile_right_indices != -1):
                     mask_B_T[world_batch_indices, future_tactile_right_indices[world_batch_indices]] = 1
+                if use_future_force:
+                    mask_B_T[world_batch_indices, future_force_indices[world_batch_indices]] = 1
             final_mask_B_T = final_mask_B_T * mask_B_T
 
         # If applicable, upweight the loss on the action predictions by a factor of `action_loss_multiplier`
@@ -660,6 +687,19 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
             demo_sample_future_tactile_right_mse_loss = torch.tensor(float("nan"), device=x0_B_C_T_H_W.device)
             demo_sample_future_tactile_right_l1_loss = torch.tensor(float("nan"), device=x0_B_C_T_H_W.device)
 
+        # Get losses for future 6-axis force prediction
+        if use_future_force:
+            future_force_diff = (
+                x0_B_C_T_H_W[batch_indices, :, future_force_indices, :, :]
+                - model_pred.x0[batch_indices, :, future_force_indices, :, :]
+            )
+            future_force_diff_demo = future_force_diff[rollout_data_mask == 0]
+            demo_sample_future_force_mse_loss = (future_force_diff_demo**2).mean()
+            demo_sample_future_force_l1_loss = torch.abs(future_force_diff_demo).mean()
+        else:
+            demo_sample_future_force_mse_loss = torch.tensor(float("nan"), device=x0_B_C_T_H_W.device)
+            demo_sample_future_force_l1_loss = torch.tensor(float("nan"), device=x0_B_C_T_H_W.device)
+
         # Get losses for future proprio prediction
         if torch.all(future_proprio_indices != -1):  # -1 indicates future proprio is not used
             future_proprio_diff = (
@@ -746,6 +786,8 @@ class CosmosPolicyDiffusionModel(BaseDiffusionModel):
             "demo_sample_future_tactile_left_l1_loss": demo_sample_future_tactile_left_l1_loss,
             "demo_sample_future_tactile_right_mse_loss": demo_sample_future_tactile_right_mse_loss,
             "demo_sample_future_tactile_right_l1_loss": demo_sample_future_tactile_right_l1_loss,
+            "demo_sample_future_force_mse_loss": demo_sample_future_force_mse_loss,
+            "demo_sample_future_force_l1_loss": demo_sample_future_force_l1_loss,
             "demo_sample_value_mse_loss": demo_sample_value_mse_loss,  # Auxiliary value loss for policy
             "demo_sample_value_l1_loss": demo_sample_value_l1_loss,  # Auxiliary value loss for policy
             # World model sample losses

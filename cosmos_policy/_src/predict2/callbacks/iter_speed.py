@@ -49,6 +49,8 @@ LOSS_KEYS_ORDER = [
     "demo_sample_future_tactile_left_l1_loss",
     "demo_sample_future_tactile_right_mse_loss",
     "demo_sample_future_tactile_right_l1_loss",
+    "demo_sample_future_force_mse_loss",
+    "demo_sample_future_force_l1_loss",
     "demo_sample_value_mse_loss",
     "demo_sample_value_l1_loss",
     "world_model_sample_future_proprio_mse_loss",

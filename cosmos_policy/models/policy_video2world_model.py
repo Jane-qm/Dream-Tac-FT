@@ -376,6 +376,21 @@ class CosmosPolicyVideo2WorldModel(CosmosPolicyDiffusionModel):
                 proprio_indices=data_batch["future_proprio_latent_idx"],
             )
 
+        # 6-axis force (Tienyi): current force is conditioning, future force is a prediction target.
+        # Injected the same way as proprio (tiled over the latent frame).
+        if "force" in data_batch and torch.all(data_batch["current_force_latent_idx"] != -1):
+            condition.gt_frames = replace_latent_with_proprio(
+                condition.gt_frames,
+                data_batch["force"],
+                proprio_indices=data_batch["current_force_latent_idx"],
+            )
+        if "future_force" in data_batch and torch.all(data_batch["future_force_latent_idx"] != -1):
+            condition.gt_frames = replace_latent_with_proprio(
+                condition.gt_frames,
+                data_batch["future_force"],
+                proprio_indices=data_batch["future_force_latent_idx"],
+            )
+
         # Manually add in value to the condition.gt_frames as well
         # (This is actually not needed for training because the value is not used as conditioning, but it may be useful
         # for visualizations when decoding the ground-truth latents to images)
@@ -678,6 +693,16 @@ class CosmosPolicyVideo2WorldModel(CosmosPolicyDiffusionModel):
                 condition.gt_frames, proprio, proprio_indices=current_proprio_latent_idx
             )
 
+        # Current 6-axis force is also conditioning input (Tienyi force layout)
+        if "force" in data_batch and torch.all(data_batch["current_force_latent_idx"] != -1):
+            force = data_batch["force"]
+            current_force_latent_idx = data_batch["current_force_latent_idx"]
+            batch_indices = torch.arange(B, device=force.device)
+            condition.condition_video_input_mask_B_C_T_H_W[batch_indices, :, current_force_latent_idx, :, :] = 1
+            condition.gt_frames = replace_latent_with_proprio(
+                condition.gt_frames, force, proprio_indices=current_force_latent_idx
+            )
+
         if (
             "mask_current_state_action_for_value_prediction" in data_batch
             and data_batch["mask_current_state_action_for_value_prediction"]
@@ -749,6 +774,14 @@ class CosmosPolicyVideo2WorldModel(CosmosPolicyDiffusionModel):
                 condition.condition_video_input_mask_B_C_T_H_W[
                     batch_indices, :, data_batch["future_image2_latent_idx"], :, :
                 ] = 0
+
+        # Tactile self-attn gate at inference, same as training (get_data_and_condition); only when the caller provides it.
+        # Assigned in place (not rebuilt via to_dict) so that non-field attributes such as orig_gt_frames are kept.
+        if "tactile_self_attn_gate" in data_batch:
+            tg = torch.as_tensor(data_batch["tactile_self_attn_gate"], dtype=torch.float32, device=x0.device).reshape(-1)
+            condition.tactile_self_attn_gate_B = tg
+            if uncondition is not None:
+                uncondition.tactile_self_attn_gate_B = tg
 
         _, condition, _, _ = self.broadcast_split_for_model_parallelsim(x0, condition, None, None)
         if uncondition is not None:

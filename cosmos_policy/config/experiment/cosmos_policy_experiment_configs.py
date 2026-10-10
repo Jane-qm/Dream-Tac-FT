@@ -26,6 +26,7 @@ from cosmos_policy.datasets.aloha_dataset import ALOHADataset
 from cosmos_policy.datasets.franka_dataset import FrankaDataset
 from cosmos_policy.datasets.libero_dataset import LIBERODataset
 from cosmos_policy.datasets.robocasa_dataset import RoboCasaDataset
+from cosmos_policy.datasets.tienyi_dataset import TienyiForceDataset
 from cosmos_policy.models.policy_video2world_model import CosmosPolicyVideo2WorldModel
 from cosmos_policy.modules.hybrid_edm_sde import HybridEDMSDE
 
@@ -1000,6 +1001,119 @@ cosmos_predict2_2b_480p_aloha_185_demos_4_tasks_mixture_foldshirt15_candiesinbow
 )
 
 
+# -----------------------------------------------------------------------------
+# Tienyi dual-arm (3 cameras + 2x 6-axis force), back battery + cover task.
+# Data: output of experiments/robot/tienyi/preprocess_tienyi_force_data.py (see docs/tienyi_handoff.md).
+# Override the data dir with env TIENYI_DATA_DIR, or on the command line via dataloader_train.dataset.data_dir=...
+# Schedule is sized for a ~2h run on 8xA100 (global batch 64, ~2.5k-3k iters).
+# -----------------------------------------------------------------------------
+_TIENYI_DATA_DIR = os.environ.get(
+    "TIENYI_DATA_DIR", "/media/jushen/zhixuan/tienyi_preprocessed/back_battery_and_cover_160"
+)
+
+
+def _tienyi_dataset(use_force: bool):
+    return L(TienyiForceDataset)(
+        data_dir=_TIENYI_DATA_DIR,
+        t5_text_embeddings_path=os.path.join(_TIENYI_DATA_DIR, "t5_embeddings.pkl"),
+        is_train=True,
+        chunk_size=16,
+        final_image_size=224,
+        num_duplicates_per_image=4,
+        use_image_aug=True,
+        use_stronger_image_aug=True,
+        normalize_actions=True,
+        normalize_proprio=True,
+        use_force=use_force,
+        future_force_mode="delta",
+        max_episodes=0,
+        load_videos_to_memory=True,
+    )
+
+
+def _tienyi_experiment(name: str, use_force: bool, use_attn_bias: bool):
+    dataset = _tienyi_dataset(use_force)
+    if use_force:
+        # 0 blank | 1 proprio | 2 L-wrist | 3 R-wrist | 4 head | 5 force || 6 action | 7 f-proprio | 8-10 f-images | 11 f-force
+        layout = dict(state_t=12, num_cond=6, chunk_duration=45)
+    else:
+        # 0 blank | 1 proprio | 2 L-wrist | 3 R-wrist | 4 head || 5 action | 6 f-proprio | 7-9 f-images
+        layout = dict(state_t=10, num_cond=5, chunk_duration=37)
+    return LazyDict(
+        dict(
+            defaults=[
+                "/experiment/cosmos_predict2_2b_480p_libero",
+                "_self_",
+            ],
+            trainer=dict(
+                max_iter=3000,
+                logging_iter=10,
+            ),
+            scheduler=dict(
+                cycle_lengths=[3000, 100000000000000],
+                warm_up_steps=[150, 0],
+                f_start=[1e-6, 0.06],
+                f_max=[1.0, 0.06],
+                f_min=[0.3, 0.06],
+            ),
+            model=L(CosmosPolicyVideo2WorldModel)(
+                config=dict(
+                    state_t=layout["state_t"],
+                    min_num_conditional_frames=layout["num_cond"],
+                    max_num_conditional_frames=layout["num_cond"],
+                    tokenizer=dict(
+                        chunk_duration=layout["chunk_duration"],
+                    ),
+                    net=dict(
+                        use_tactile_self_attn_bias=use_attn_bias,
+                        tactile_self_attn_alpha=2.0,
+                        tactile_latent_t_indices=(5, 11),
+                        tactile_attn_chunk_q=32,
+                    ),
+                ),
+            ),
+            dataloader_train=L(DataLoader)(
+                num_workers=8,
+                persistent_workers=True,
+                pin_memory=True,
+                dataset=dataset,
+                sampler=L(DistributedSampler)(
+                    dataset=dataset,
+                    num_replicas=L(parallel_state.get_data_parallel_world_size)(),
+                    rank=L(parallel_state.get_data_parallel_rank)(),
+                    shuffle=True,
+                    seed=0,
+                ),
+                batch_size=8,
+                drop_last=True,
+            ),
+            checkpoint=dict(
+                save_iter=500,
+            ),
+            job=dict(
+                project="cosmos_policy_tienyi_battery",
+                group="cosmos_v2_finetune",
+                name=name,
+                wandb_id=name,
+            ),
+        )
+    )
+
+
+# Baseline: 3 cameras + proprio, no force (10 slots)
+cosmos_predict2_2b_480p_tienyi_battery_no_force = _tienyi_experiment(
+    "cosmos_predict2_2b_480p_tienyi_battery_no_force", use_force=False, use_attn_bias=False
+)
+# Main: + current/future 6-axis force slots + force-gated CASA bias on slots (5, 11)
+cosmos_predict2_2b_480p_tienyi_battery_force = _tienyi_experiment(
+    "cosmos_predict2_2b_480p_tienyi_battery_force", use_force=True, use_attn_bias=True
+)
+# Ablation: force slots without the CASA attention bias
+cosmos_predict2_2b_480p_tienyi_battery_force_no_attn_bias = _tienyi_experiment(
+    "cosmos_predict2_2b_480p_tienyi_battery_force_no_attn_bias", use_force=True, use_attn_bias=False
+)
+
+
 def register_configs():
     cs = ConfigStore.instance()
     # Register the experiments
@@ -1021,6 +1135,9 @@ def register_configs():
         cosmos_predict2_2b_480p_franka_cut_banana_20260321_no_tactile_img_aug,  # Cut banana + tactile; no aug on tactile RGB
         cosmos_predict2_2b_480p_franka_cut_banana_20260321_tactile_no_attn_bias,  # Tactile inputs, no tactile self-attn bias
         cosmos_predict2_2b_480p_franka_cut_banana_20260321_no_tactile,  # Same data dir, LIBERO 8-slot (no tactile load)
+        cosmos_predict2_2b_480p_tienyi_battery_no_force,  # Tienyi dual-arm, 3 cams, no force (10 slots)
+        cosmos_predict2_2b_480p_tienyi_battery_force,  # Tienyi dual-arm + 6-axis force slots + CASA (12 slots)
+        cosmos_predict2_2b_480p_tienyi_battery_force_no_attn_bias,  # Same as above without CASA bias
         cosmos_predict2_2b_480p_aloha_185_demos_4_tasks_mixture_foldshirt15_candiesinbowl45_candyinbag45_eggplantchickenonplate80__resumeFrom50K_648_rollouts_Vsprime_value_func,  # ALOHA planning model
         cosmos_predict2_2b_480p_aloha_185_demos_4_tasks_mixture_foldshirt15_candiesinbowl45_candyinbag45_eggplantchickenonplate80__resumeFrom50K_648_rollouts_Vsprime_value_func__inference_only,
     ]:
