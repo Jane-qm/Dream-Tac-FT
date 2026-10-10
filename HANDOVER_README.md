@@ -1,15 +1,28 @@
-# 项目交接说明
+# 项目交接说明 (Dream-Tac-FT)
 
-## 已提交的内容
-- 核心代码（Dream-Tac）
-- 测试代码（handover/tienyi_tests）
-- 实验结果（handover/tienyi_eval）
-- 部分环境配置脚本（handover/tienyi_setup_scripts）
+## 📌 交接情况
+- 交接日期：2026-10-10
+- 原开发环境：百度云 A100 主机 (`/media/jushen/zhixuan`)
 
-## 未提交的大型文件（需交接人自行重新生成）
-1. `tienyi_setup` (6.1G)：包含环境与依赖。请查看 `tienyi_setup_scripts` 内的 `.sh` 脚本重新安装。
-2. `tienyi_preprocessed` (1.7G)：预处理数据。生成代码位于 `Dream-Tac` 仓库的 [填写具体代码路径]，请自行运行生成。
-3. `checkpoints` 模型权重：请重新下载或自行训练。
+## 📂 已提交到仓库的内容
+| 文件夹 | 说明 |
+|--------|------|
+| `Dream-Tac/` (主分支) | 核心训练/推理代码 |
+| `handover/tienyi_tests/` | 测试代码与验证脚本 |
+| `handover/tienyi_eval/` | 实验结果（metrics.json、可视化图片） |
+| `handover/tienyi_setup_scripts/` | 环境搭建与训练启动脚本 |
 
-## 注意
-本项目原先在百度云 A100 主机上的路径为 `/media/jushen/zhixuan`。
+## 🚫 未提交的大型文件（接手人需自行处理）
+| 文件/文件夹 | 大小 | 处理方式 |
+|-------------|------|----------|
+| `tienyi_setup/` | 6.1G | 见 `handover/tienyi_setup_scripts/` 中的脚本重新搭建 |
+| `tienyi_preprocessed/` | 1.7G | 需运行预处理代码重新生成 |
+| `checkpoints/` | - | 模型权重，需重新训练或单独下载 |
+
+## 🚀 接手人快速开始
+1. **克隆仓库**：
+   ```bash
+   git clone git@github.com:Jane-qm/Dream-Tac-FT.git
+   cd Dream-Tac-FT
+   git checkout 1010FT_as_input
+
